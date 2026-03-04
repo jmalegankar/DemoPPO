@@ -1,26 +1,42 @@
-from dataclasses import dataclass
-from typing import Tuple
+from __future__ import annotations
+from dataclasses import dataclass, field
+from typing import Literal
+
 
 @dataclass
 class SCVAEConfig:
-    conv_channels: Tuple[int, ...] = (32, 64)
-    hidden_dim: int = 256
+    # ── Observation ────────────────────────────────────────────────
+    obs_type:  Literal["state", "pixels"] = "state"
+    obs_dim:   int  = 39          # flat state dim  (state mode only)
+    act_dim:   int  = 4           # continuous action dim
 
-    latent_dim: int = 32
-    rho_min: float = 0.001
-    rho_max: float = 0.999
+    # ── MLP Embedding (state mode) ─────────────────────────────────
+    mlp_hidden_dim:  int       = 256
+    mlp_n_layers:   int        = 2    # depth of obs embedding MLP
+    embed_out_dim:   int       = 256  # output dim of embedding → feeds encoder trunk
 
-    n_actions: int = 7
-    action_embed_dim: int = 8
+    # ── Conv Embedding (pixel mode) ────────────────────────────────
+    conv_channels:   list[int] = field(default_factory=lambda: [32, 64, 64])
 
-    kl_max_terms: int = 128
+    # ── Action Embedding ───────────────────────────────────────────
+    action_embed_dim: int = 64
 
-    no_op_action: int = 0
+    # ── Encoder / Decoder trunk ────────────────────────────────────
+    hidden_dim:  int = 256
+    latent_dim:  int = 32
 
-    # VAE training
-    lr: float = 1e-4
-    beta: float = 0.005
+    # ── Spherical Cauchy ───────────────────────────────────────────
+    rho_min:      float = 0.1
+    rho_max:      float = 0.95
+    kl_quad_points: int = 64     # Gauss-Legendre points for quadrature KL
 
-    # Uniformity loss
-    uniformity_t: float = 2.0
-    alpha_uniform: float = 0.05
+    # ── Training ───────────────────────────────────────────────────
+    lr:               float = 3e-4
+    weight_decay:     float = 1e-4
+    batch_size:       int   = 256
+    epochs:           int   = 100
+
+    # ── KL annealing (matches paper SMILES setup) ──────────────────
+    kl_warmup_epochs: int   = 10    # beta=0 for this many epochs
+    kl_ramp_epochs:   int   = 15    # linear ramp from 0 → beta_target
+    beta_target:      float = 0.2   # final KL weight after ramp

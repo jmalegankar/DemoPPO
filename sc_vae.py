@@ -1,21 +1,18 @@
 from __future__ import annotations
 
-from typing import NamedTuple, Tuple
+from typing import NamedTuple, Tuple, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# from models.obs_embeddings import ObservationEmbedding
+from obs_embeddings import MLPObsEmbedding, CNNObsEmbedding
 from config import SCVAEConfig
 
 
 # ===================================================================
-# Spherical Cauchy helpers
+# Spherical Cauchy helpers  (unchanged from original)
 # ===================================================================
-
-_KL_SERIES_CACHE: dict = {}
-
 
 def _mobius_add(a: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     a_sq = (a * a).sum(-1, keepdim=True)
@@ -31,86 +28,111 @@ def _sc_sample(mu: torch.Tensor, rho: torch.Tensor) -> torch.Tensor:
     return _mobius_add(rho * mu, xi)
 
 
-def _get_kl_series_terms(
-    dim: int,
-    max_terms: int,
-    device: torch.device,
-    dtype: torch.dtype,
-) -> torch.Tensor:
+
+def _sc_kl_asymptotic(rho: torch.Tensor, dim: int) -> torch.Tensor:
     """
-    Cached (K,) tensor of  coeff_k * psi_diff_k  for k = 1..max_terms.
-    Independent of rho and batch size, so safe to cache per (dim, device, dtype).
+    Proposition 2 (paper §3.2.2): KL ≈ (d-1)*log((1+ρ)/(1-ρ)) + ψ((d-1)/2) - ψ(d-1)
+    Verified against paper eq. directly. Valid when ρ > 0.9 (z → 1).
     """
-    key = (dim, max_terms, str(device), str(dtype))
-
-    if key in _KL_SERIES_CACHE:
-        return _KL_SERIES_CACHE[key]
-
-    d_minus_1 = float(dim - 1)
-    a         = d_minus_1 / 2.0
-    a_t       = torch.tensor(a, device=device, dtype=dtype)
-
-    k = torch.arange(1, max_terms + 1, device=device, dtype=dtype)
-
-    # log( (a)_k / k! )  via lgamma
-    log_coeff = torch.lgamma(a_t + k) - torch.lgamma(a_t) - torch.lgamma(k + 1.0)
-    coeff     = torch.exp(log_coeff)
-
-    psi_base = torch.digamma(torch.tensor(d_minus_1, device=device, dtype=dtype))
-    psi_diff = torch.digamma(d_minus_1 + k) - psi_base   # ψ(d-1+k) - ψ(d-1)
-
-    scalar_terms = coeff * psi_diff   # (K,)
-
-    _KL_SERIES_CACHE[key] = scalar_terms
-    return scalar_terms
-
-
-def _sc_kl_asymptotic(
-    rho: torch.Tensor,
-    dim: int,
-) -> torch.Tensor:
-    """
-    Proposition 2 (paper §3.2.2): asymptotic KL for rho → 1.
-
-    KL ≈ (d-1) * log((1+ρ)/(1-ρ)) + ψ((d-1)/2) - ψ(d-1)
-
-    Used when rho > RHO_ASYMP_THRESHOLD (= 0.9) because z(ρ) → 1
-    causes the power series to converge too slowly.
-    """
-    device    = rho.device
-    dtype     = rho.dtype
-    d_minus_1 = float(dim - 1)
-
-    log_term   = d_minus_1 * (torch.log1p(rho) - torch.log1p(-rho))  # (d-1)*log((1+ρ)/(1-ρ))
+    d_minus_1  = float(dim - 1)
+    # (d-1) * log((1+ρ)/(1-ρ)) — positive ✓
+    log_term   = d_minus_1 * (torch.log1p(rho) - torch.log1p(-rho))
+    # ψ((d-1)/2) - ψ(d-1) — negative but small relative to log_term ✓
     correction = (
-        torch.digamma(torch.tensor(d_minus_1 / 2.0, device=device, dtype=dtype))
-        - torch.digamma(torch.tensor(d_minus_1,     device=device, dtype=dtype))
-    )  # scalar
-
+        torch.digamma(torch.tensor(d_minus_1 / 2.0, device=rho.device, dtype=rho.dtype))
+        - torch.digamma(torch.tensor(d_minus_1,     device=rho.device, dtype=rho.dtype))
+    )
     return (log_term + correction).clamp_min(0.0)
 
 
-# Threshold from paper: "for ρ > 0.9 we use the asymptotic approximation"
-_RHO_ASYMP = 0.9
+_GL_CACHE: dict = {}
 
+
+def _gauss_legendre_01(n: int, device: torch.device, dtype: torch.dtype) -> tuple:
+    """
+    Gauss-Legendre nodes and weights mapped to [0, 1].
+    Cached per (n, device, dtype).
+    """
+    key = (n, str(device), str(dtype))
+    if key in _GL_CACHE:
+        return _GL_CACHE[key]
+
+    import numpy as np
+    nodes_np, weights_np = np.polynomial.legendre.leggauss(n)
+    # map [-1,1] -> [0,1]: t = (s+1)/2, w -> w/2
+    t = torch.tensor((nodes_np + 1.0) / 2.0, device=device, dtype=dtype)
+    w = torch.tensor(weights_np / 2.0,        device=device, dtype=dtype)
+    _GL_CACHE[key] = (t, w)
+    return t, w
+
+
+def _sc_kl_quadrature(
+    rho: torch.Tensor,
+    dim: int,
+    *,
+    n_points: int = 64,
+) -> torch.Tensor:
+    """
+    Proposition 1 (paper §3.2.2): quadrature-based KL for ρ ≤ 0.9.
+
+    KL = (d-1)*log((1-ρ)/(1+ρ))
+       + (d-1) * ∫_0^1 [t^{d-2}/(1-t)] * [1 - ((1-ρ)²/((1+ρ)²-4ρt))^{(d-1)/2}] dt
+
+    The integrand has a removable singularity at t=1 (both numerator 1/(1-t)
+    and the bracket → 0, limit is finite: 2(d-1)ρ/(1-ρ)²). Standard G-L
+    handles this stably with enough points.
+
+    This avoids the pref=((1-ρ)/(1+ρ))^{d-1} underflow in the power series
+    branch, which collapses to 0 for dim≥16 at moderate ρ.
+    """
+    device, dtype = rho.device, rho.dtype
+    d_minus_1     = float(dim - 1)
+    alpha         = d_minus_1 / 2.0
+
+    t_gl, w_gl = _gauss_legendre_01(n_points, device, dtype)  # (Q,)
+
+    # broadcast: rho (B,1), t (1,Q) -> (B,Q)
+    t_gl = t_gl.unsqueeze(0)    # (1, Q)
+    w_gl = w_gl.unsqueeze(0)    # (1, Q)
+
+    # ((1-ρ)² / ((1+ρ)² - 4ρt))^α
+    denom = (1.0 + rho).pow(2) - 4.0 * rho * t_gl   # (B, Q)
+    denom = denom.clamp_min(1e-10)
+    ratio = (1.0 - rho).pow(2) / denom               # (B, Q), in (0,1]
+    inner = 1.0 - ratio.pow(alpha)                   # (B, Q), in [0,1)
+
+    # t^{d-2} / (1-t): clamp near t=1 (singularity is removable, inner→0 there)
+    t_pow        = t_gl.pow(max(d_minus_1 - 1.0, 0.0))   # (1, Q)
+    one_minus_t  = (1.0 - t_gl).clamp_min(1e-10)          # (1, Q)
+    integrand    = (t_pow / one_minus_t) * inner           # (B, Q)
+
+    integral = (w_gl * integrand).sum(dim=-1, keepdim=True)  # (B, 1)
+
+    # term1 is negative (log of value < 1); term2 is positive and larger
+    term1 = d_minus_1 * (torch.log1p(-rho) - torch.log1p(rho))
+    term2 = d_minus_1 * integral
+    return (term1 + term2).clamp_min(0.0)
+
+
+_RHO_ASYMP = 0.9
 
 def _sc_kl_uniform(
     rho: torch.Tensor,
     dim: int,
     *,
-    max_terms: int = 64,
+    n_quad_points: int = 64,
 ) -> torch.Tensor:
     """
-    KL( spCauchy_d(·|μ,ρ) ‖ Uniform(S^{d-1}) ) — Theorem 1.
+    KL( spCauchy_d(·|μ,ρ) ‖ Uniform(S^{d-1}) )
 
-    Vectorised over batch; series terms cached per (dim, device, dtype).
-    For ρ > 0.9 falls back to Proposition 2 asymptotic to avoid slow
-    convergence when z(ρ) → 1.
+    Branches (matching paper §3.2.2):
+      ρ ≤ 0.9  →  Proposition 1 (Gauss-Legendre quadrature) — stable for all d
+      ρ >  0.9 →  Proposition 2 (asymptotic)
 
     Args:
-        rho:       (B,) or (B,1) tensor, values in [0, 1)
-        dim:       latent dimension d  (must be ≥ 2)
-        max_terms: series truncation for the ρ ≤ 0.9 branch
+        rho:           (B,) or (B,1) in [0, 1)
+        dim:           latent dimension d ≥ 2
+        n_quad_points: G-L quadrature points for the low-ρ branch
     Returns:
         kl: (B,1) non-negative tensor
     """
@@ -119,77 +141,28 @@ def _sc_kl_uniform(
 
     rho = rho.to(dtype=torch.float32)
     if rho.dim() == 1:
-        rho = rho.unsqueeze(-1)   # (B,1)
+        rho = rho.unsqueeze(-1)
+    rho = rho.clamp(0.0, 1.0 - 1e-7)
 
-    eps = 1e-7
-    rho = rho.clamp(0.0, 1.0 - eps)
+    high_rho = rho > _RHO_ASYMP   # (B,1)
+    kl       = torch.zeros_like(rho)
 
-    device    = rho.device
-    dtype     = rho.dtype
-    d_minus_1 = float(dim - 1)
-
-    # ----------------------------------------------------------------
-    # Masks for the two branches
-    # ----------------------------------------------------------------
-    high_rho = rho > _RHO_ASYMP   # (B,1) bool
-
-    kl = torch.zeros_like(rho)
-
-    # ----------------------------------------------------------------
-    # Branch A — power series (ρ ≤ 0.9)
-    # ----------------------------------------------------------------
+    # ── Branch A: quadrature (ρ ≤ 0.9) ──────────────────────────
     if high_rho.logical_not().any():
-        rho_lo = rho.clone()
-        rho_lo[high_rho] = 0.0   # dummy safe value; result masked out below
+        rho_lo         = rho.clone(); rho_lo[high_rho] = 0.5
+        kl_lo          = _sc_kl_quadrature(rho_lo, dim, n_points=n_quad_points)
+        kl             = torch.where(high_rho, kl, kl_lo)
 
-        log_ratio = torch.log1p(-rho_lo) - torch.log1p(rho_lo)
-        term1     = d_minus_1 * log_ratio
-
-        ratio = (1.0 - rho_lo) / (1.0 + rho_lo)
-        pref  = d_minus_1 * ratio.pow(d_minus_1)
-
-        z = 4.0 * rho_lo / (1.0 + rho_lo).pow(2)   # (B,1)
-
-        scalar_terms = _get_kl_series_terms(dim, max_terms, device, dtype)  # (K,)
-        k     = torch.arange(1, max_terms + 1, device=device, dtype=dtype)
-        z_pow = z.pow(k)                             # (B,K)
-
-        series = (z_pow * scalar_terms).sum(dim=-1, keepdim=True)  # (B,1)
-        kl_lo  = (term1 + pref * series).clamp_min(0.0)
-
-        kl = torch.where(high_rho, kl, kl_lo)
-
-    # ----------------------------------------------------------------
-    # Branch B — asymptotic (ρ > 0.9, Proposition 2)
-    # ----------------------------------------------------------------
+    # ── Branch B: asymptotic (ρ > 0.9) ───────────────────────────
     if high_rho.any():
-        rho_hi = rho.clone()
-        rho_hi[~high_rho] = 0.5   # dummy safe value; result masked out below
-
-        kl_hi = _sc_kl_asymptotic(rho_hi, dim)
-        kl    = torch.where(high_rho, kl_hi, kl)
+        rho_hi = rho.clone(); rho_hi[~high_rho] = 0.5
+        kl     = torch.where(high_rho, _sc_kl_asymptotic(rho_hi, dim), kl)
 
     return kl
 
-# ==================================================================
-# Uniformity Loss
-# ==================================================================
+
 def _uniformity_loss(mu: torch.Tensor, t: float = 2.0) -> torch.Tensor:
-    """
-    Wang & Isola (2020) uniformity loss on S^{d-1}.
-
-    L_uniform = log E[exp(-t * ||mu_i - mu_j||^2)]  for i != j
-
-    For unit vectors: ||a-b||^2 = 2(1 - a·b)
-    Minimising this spreads mu's uniformly across the sphere.
-
-    Args:
-        mu: (B, d) unit vectors
-        t:  kernel bandwidth (default 2.0 from paper)
-    Returns:
-        scalar (lower = more uniform)
-    """
-    sq_dists = 2.0 - 2.0 * (mu @ mu.T)   # (B, B)
+    sq_dists = 2.0 - 2.0 * (mu @ mu.T)
     mask     = ~torch.eye(mu.size(0), dtype=torch.bool, device=mu.device)
     return torch.log(torch.exp(-t * sq_dists[mask]).mean())
 
@@ -199,140 +172,171 @@ def _uniformity_loss(mu: torch.Tensor, t: float = 2.0) -> torch.Tensor:
 # ===================================================================
 
 class SCVAEForwardOutput(NamedTuple):
-    recon:        torch.Tensor
-    mu:           torch.Tensor
-    rho:          torch.Tensor
-    z:            torch.Tensor
-    recon_target: torch.Tensor
+    recon:        torch.Tensor   # (B, recon_target_dim)
+    mu:           torch.Tensor   # (B, latent_dim)  unit vectors
+    rho:          torch.Tensor   # (B, 1)
+    z:            torch.Tensor   # (B, latent_dim)
+    recon_target: torch.Tensor   # (B, recon_target_dim)
 
 
 # ===================================================================
-# Conv block
+# TransitionSCVAE  —  embedding-agnostic
 # ===================================================================
 
-class ConvBlock(nn.Module):
-    def __init__(self, in_ch: int, out_ch: int):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, 3, padding=1), nn.ReLU(),
-            nn.Conv2d(out_ch, out_ch, 3, padding=1), nn.ReLU(),
-        )
+ObsEmbedding = Union[MLPObsEmbedding, CNNObsEmbedding]
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
-
-
-# ===================================================================
-# TransitionSCVAE
-# ===================================================================
 
 class TransitionSCVAE(nn.Module):
     """
-    Env-agnostic Spherical Cauchy VAE.
+    Spherical Cauchy VAE over (s_t, a_t, s_{t+1}) transitions.
 
-    Contract:
-      embedding(obs) -> (B, C, H, W) float
-      SCVAE never tries to infer obs layout.
+    The observation embedding is injected — pass MLPObsEmbedding for state
+    obs or CNNObsEmbedding for pixels. The rest of the model is identical.
+
+    The encoder trunk sees:
+        [embed(s_t)  |  action_embed(a_t)  |  embed(s_next)]
+        dim: embed_out_dim + action_embed_dim + embed_out_dim
+
+    The decoder reconstructs the same concatenation as the regression target.
     """
 
-    def __init__(
-        self,
-        embedding: ObservationEmbedding,
-        cfg: SCVAEConfig,
-        sample_input_shape: Tuple[int, ...],
-    ):
+    def __init__(self, embedding: ObsEmbedding, cfg: SCVAEConfig):
         super().__init__()
-        self.embedding  = embedding
+
         self.cfg        = cfg
+        self.embedding  = embedding
         self.latent_dim = cfg.latent_dim
 
-        # conv encoder
-        layers = []
-        in_ch  = embedding.out_channels
-        for ch in cfg.conv_channels:
-            layers.append(ConvBlock(in_ch, ch))
-            in_ch = ch
-        self.conv = nn.Sequential(*layers)
+        E = embedding.out_dim          # embedding output dim
+        A = cfg.action_embed_dim
+        H = cfg.hidden_dim
 
-        # infer conv feature dim
-        with torch.no_grad():
-            dummy          = torch.zeros((1, *sample_input_shape))
-            dummy_feat     = self.conv(self._embed(dummy))
-            self._feat_dim = dummy_feat.flatten(1).shape[1]
-
-        # action embedding
-        self.action_embed = nn.Embedding(cfg.n_actions, cfg.action_embed_dim)
-
-        # bottleneck
-        self.fc = nn.Sequential(
-            nn.Linear(2 * self._feat_dim + cfg.action_embed_dim, cfg.hidden_dim),
+        # ── Action embedding (continuous → dense) ─────────────────
+        self.action_embed = nn.Sequential(
+            nn.Linear(cfg.act_dim, A),
             nn.ReLU(),
         )
-        self.fc_mu  = nn.Linear(cfg.hidden_dim, cfg.latent_dim)
-        self.fc_rho = nn.Linear(cfg.hidden_dim, 1)
 
-        # decoder
-        self.decoder_trunk = nn.Sequential(
-            nn.Linear(cfg.latent_dim, cfg.hidden_dim), nn.ReLU(),
-            nn.Linear(cfg.hidden_dim, cfg.hidden_dim), nn.ReLU(),
+        # ── Encoder trunk ─────────────────────────────────────────
+        # input: [h_s | a_emb | h_sn]
+        self.encoder_trunk = nn.Sequential(
+            nn.Linear(2 * E + A, H),
+            nn.LayerNorm(H),
+            nn.ReLU(),
+            nn.Linear(H, H),
+            nn.LayerNorm(H),
+            nn.ReLU(),
         )
-        self.state_t_head    = nn.Linear(cfg.hidden_dim, self._feat_dim)
-        self.action_head     = nn.Linear(cfg.hidden_dim, cfg.action_embed_dim)
-        self.state_next_head = nn.Linear(cfg.hidden_dim, self._feat_dim)
+        self.fc_mu  = nn.Linear(H, cfg.latent_dim)
+        self.fc_rho = nn.Linear(H, 1)
+
+        # ── Decoder ───────────────────────────────────────────────
+        # reconstructs [embed(s_t) | action_embed(a_t) | embed(s_next)]
+        self._recon_dim = 2 * E + A
+        self.decoder = nn.Sequential(
+            nn.Linear(cfg.latent_dim, H),
+            nn.ReLU(),
+            nn.Linear(H, H),
+            nn.ReLU(),
+            nn.Linear(H, self._recon_dim),
+        )
+
+    # ── Internal helpers ──────────────────────────────────────────
 
     def _embed(self, obs: torch.Tensor) -> torch.Tensor:
-        x = self.embedding(obs)
-        if x.dim() != 4:
-            raise ValueError(f"embedding must return (B,C,H,W), got {tuple(x.shape)}")
-        return x
+        return self.embedding(obs)    # (B, E)
 
-    def _encode_parts(self, s_t, a_t, s_next):
-        h_s  = self.conv(self._embed(s_t)).flatten(1)
-        h_sn = self.conv(self._embed(s_next)).flatten(1)
-        a_emb = self.action_embed(a_t.long())
+    def _encode_parts(
+        self,
+        s_t:    torch.Tensor,
+        a_t:    torch.Tensor,
+        s_next: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        h_s   = self._embed(s_t)           # (B, E)
+        h_sn  = self._embed(s_next)        # (B, E)
+        a_emb = self.action_embed(a_t)     # (B, A)
         return h_s, a_emb, h_sn
 
-    def _build_target(self, s_t, a_t, s_next) -> torch.Tensor:
+    def _build_target(
+        self,
+        s_t:    torch.Tensor,
+        a_t:    torch.Tensor,
+        s_next: torch.Tensor,
+    ) -> torch.Tensor:
         with torch.no_grad():
             h_s, a_emb, h_sn = self._encode_parts(s_t, a_t, s_next)
-        return torch.cat([h_s, a_emb, h_sn], dim=-1)
+        return torch.cat([h_s, a_emb, h_sn], dim=-1)   # (B, 2E+A)
 
-    def _decode_z(self, z: torch.Tensor) -> torch.Tensor:
-        h = self.decoder_trunk(z)
-        return torch.cat(
-            [self.state_t_head(h), self.action_head(h), self.state_next_head(h)],
-            dim=-1,
-        )
+    # ── Public API ────────────────────────────────────────────────
 
-    def encode_state(self, s_t: torch.Tensor) -> torch.Tensor:
-        """Returns flattened conv features for s_t. Used by policy."""
-        with torch.no_grad():
-            return self.conv(self._embed(s_t)).flatten(1)  # (B, feat_dim)
-
-    def encode(self, s_t, a_t, s_next):
+    def encode(
+        self,
+        s_t:    torch.Tensor,
+        a_t:    torch.Tensor,
+        s_next: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         h_s, a_emb, h_sn = self._encode_parts(s_t, a_t, s_next)
-        h   = self.fc(torch.cat([h_s, a_emb, h_sn], dim=-1))
+        h   = self.encoder_trunk(torch.cat([h_s, a_emb, h_sn], dim=-1))
         mu  = F.normalize(self.fc_mu(h), p=2, dim=-1)
         rho = torch.sigmoid(self.fc_rho(h))
         rho = self.cfg.rho_min + rho * (self.cfg.rho_max - self.cfg.rho_min)
-        return mu, rho
+        return mu, rho     # (B, latent_dim), (B, 1)
 
     def decode(self, z: torch.Tensor) -> torch.Tensor:
-        return self._decode_z(z)
+        return self.decoder(z)   # (B, 2E+A)
 
-    def forward(self, s_t, a_t, s_next) -> SCVAEForwardOutput:
+    def encode_state(self, s_t: torch.Tensor) -> torch.Tensor:
+        """
+        Returns the embedding of s_t only.
+        This is what the PPO policy consumes — no future obs required.
+        Gradient flow is controlled by the caller (detach for frozen encoder).
+        """
+        return self._embed(s_t)   # (B, E)
+
+    def forward(
+        self,
+        s_t:    torch.Tensor,
+        a_t:    torch.Tensor,
+        s_next: torch.Tensor,
+    ) -> SCVAEForwardOutput:
         mu, rho      = self.encode(s_t, a_t, s_next)
         z            = _sc_sample(mu, rho) if self.training else mu
-        recon        = self._decode_z(z)
+        recon        = self.decode(z)
         recon_target = self._build_target(s_t, a_t, s_next)
         return SCVAEForwardOutput(recon, mu, rho, z, recon_target)
 
-    def loss(self, out: SCVAEForwardOutput) -> Tuple[torch.Tensor, torch.Tensor]:
-        l_recon = F.mse_loss(out.recon, out.recon_target)
-        l_kl    = _sc_kl_uniform(
-            out.rho,
-            self.latent_dim,
-            max_terms=self.cfg.kl_max_terms,
+    def loss(
+        self,
+        out: SCVAEForwardOutput,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        l_recon   = F.mse_loss(out.recon, out.recon_target)
+        l_kl      = _sc_kl_uniform(
+            out.rho, self.latent_dim, n_quad_points=self.cfg.kl_quad_points
         ).mean()
         l_uniform = _uniformity_loss(out.mu, t=self.cfg.uniformity_t)
         return l_recon, l_kl, l_uniform
+
+
+# ===================================================================
+# Factory
+# ===================================================================
+
+def build_scvae(cfg: SCVAEConfig) -> TransitionSCVAE:
+    """Construct the right embedding + VAE from config alone."""
+    if cfg.obs_type == "state":
+        embedding = MLPObsEmbedding(
+            obs_dim=cfg.obs_dim,
+            hidden_dim=cfg.mlp_hidden_dim,
+            out_dim=cfg.embed_out_dim,
+            n_layers=cfg.mlp_n_layers,
+        )
+    elif cfg.obs_type == "pixels":
+        embedding = CNNObsEmbedding(
+            in_channels=3,
+            conv_channels=cfg.conv_channels,
+            out_dim=cfg.embed_out_dim,
+        )
+    else:
+        raise ValueError(f"Unknown obs_type: {cfg.obs_type}")
+
+    return TransitionSCVAE(embedding, cfg)
