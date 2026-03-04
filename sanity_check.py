@@ -55,13 +55,12 @@ def main():
     print(f"  recon {tuple(out.recon.shape)}")
 
     # ── Loss ──────────────────────────────────────────────────────
-    l_recon, l_kl, l_uniform = model.loss(out)
-    loss = l_recon + cfg.beta * l_kl + cfg.gamma * l_uniform
+    l_recon, l_kl = model.loss(out)
+    loss = l_recon + cfg.beta_target * l_kl
 
     print(f"\nLoss:")
     print(f"  recon   = {l_recon.item():.4f}")
     print(f"  kl      = {l_kl.item():.4f}")
-    print(f"  uniform = {l_uniform.item():.4f}")
     print(f"  total   = {loss.item():.4f}")
 
     # ── Backward ──────────────────────────────────────────────────

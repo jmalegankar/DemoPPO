@@ -278,8 +278,7 @@ class TransitionSCVAE(nn.Module):
         h_s, a_emb, h_sn = self._encode_parts(s_t, a_t, s_next)
         h   = self.encoder_trunk(torch.cat([h_s, a_emb, h_sn], dim=-1))
         mu  = F.normalize(self.fc_mu(h), p=2, dim=-1)
-        rho = torch.sigmoid(self.fc_rho(h))
-        rho = self.cfg.rho_min + rho * (self.cfg.rho_max - self.cfg.rho_min)
+        rho = torch.sigmoid(self.fc_rho(h))   # free in (0, 1)
         return mu, rho     # (B, latent_dim), (B, 1)
 
     def decode(self, z: torch.Tensor) -> torch.Tensor:
@@ -305,16 +304,12 @@ class TransitionSCVAE(nn.Module):
         recon_target = self._build_target(s_t, a_t, s_next)
         return SCVAEForwardOutput(recon, mu, rho, z, recon_target)
 
-    def loss(
-        self,
-        out: SCVAEForwardOutput,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        l_recon   = F.mse_loss(out.recon, out.recon_target)
-        l_kl      = _sc_kl_uniform(
+    def loss(self, out: SCVAEForwardOutput) -> Tuple[torch.Tensor, torch.Tensor]:
+        l_recon = F.mse_loss(out.recon, out.recon_target)
+        l_kl    = _sc_kl_uniform(
             out.rho, self.latent_dim, n_quad_points=self.cfg.kl_quad_points
         ).mean()
-        l_uniform = _uniformity_loss(out.mu, t=self.cfg.uniformity_t)
-        return l_recon, l_kl, l_uniform
+        return l_recon, l_kl
 
 
 # ===================================================================

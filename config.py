@@ -30,7 +30,12 @@ class SCVAEConfig:
     rho_max:      float = 0.95
     kl_quad_points: int = 64     # Gauss-Legendre points for quadrature KL
 
-    # ── Training ───────────────────────────────────────────────────
+    # ── Loss weights ───────────────────────────────────────────────
+    beta:         float = 0.5    # KL weight
+    gamma:        float = 0.1    # uniformity weight
+    uniformity_t: float = 2.0   # bandwidth for uniformity kernel
+
+        # ── Training ───────────────────────────────────────────────────
     lr:               float = 3e-4
     weight_decay:     float = 1e-4
     batch_size:       int   = 256
@@ -38,5 +43,5 @@ class SCVAEConfig:
 
     # ── KL annealing (matches paper SMILES setup) ──────────────────
     kl_warmup_epochs: int   = 10    # beta=0 for this many epochs
-    kl_ramp_epochs:   int   = 15    # linear ramp from 0 → beta_target
-    beta_target:      float = 0.2   # final KL weight after ramp
+    kl_ramp_epochs:   int   = 50    # linear ramp from 0 → beta_target
+    beta_target:      float = 0.05  # final KL weight after ramp
