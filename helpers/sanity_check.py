@@ -10,8 +10,8 @@ import torch
 from torch.utils.data import DataLoader
 
 from demo_dataset import DemoDataset
-from config import SCVAEConfig
-from sc_vae import build_scvae
+from models.config import SCVAEConfig
+from models.sc_vae import build_scvae
 
 
 def main():

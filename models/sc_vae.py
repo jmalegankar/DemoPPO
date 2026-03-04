@@ -6,12 +6,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from obs_embeddings import MLPObsEmbedding, CNNObsEmbedding
-from config import SCVAEConfig
+from models.obs_embeddings import MLPObsEmbedding, CNNObsEmbedding
+from models.config import SCVAEConfig
 
 
 # ===================================================================
-# Spherical Cauchy helpers  (unchanged from original)
+# Spherical Cauchy helpers
 # ===================================================================
 
 def _mobius_add(a: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
