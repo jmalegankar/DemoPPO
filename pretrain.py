@@ -48,7 +48,7 @@ def run_epoch(
     model.train(train)
     context = torch.enable_grad() if train else torch.no_grad()
 
-    total_recon = total_kl = total_loss = 0.0
+    total_recon = total_kl = total_uniform = total_loss = 0.0
     rho_mean_acc = rho_std_acc = 0.0
     n_batches = 0
 
@@ -57,8 +57,8 @@ def run_epoch(
             s_t, a, s_next = s_t.to(device), a.to(device), s_next.to(device)
 
             out = model(s_t, a, s_next)
-            l_recon, l_kl = model.loss(out)
-            loss = l_recon + beta * l_kl
+            l_recon, l_kl, l_uniform = model.loss(out)
+            loss = l_recon + beta * l_kl + l_uniform
 
             if train:
                 optimizer.zero_grad()
@@ -68,6 +68,7 @@ def run_epoch(
 
             total_recon += l_recon.item()
             total_kl    += l_kl.item()
+            total_uniform += l_uniform.item()
             total_loss  += loss.item()
             rho_mean_acc += out.rho.mean().item()
             rho_std_acc  += out.rho.std().item()
@@ -77,6 +78,7 @@ def run_epoch(
         "loss":     total_loss  / n_batches,
         "recon":    total_recon / n_batches,
         "kl":       total_kl    / n_batches,
+        "uniform":  total_uniform / n_batches,
         "rho_mean": rho_mean_acc / n_batches,
         "rho_std":  rho_std_acc  / n_batches,
     }
@@ -152,7 +154,7 @@ def main():
             f"epoch {epoch+1:03d}/{cfg.epochs} | "
             f"beta={beta:.3f} | "
             f"train loss={train_m['loss']:.4f} "
-            f"(recon={train_m['recon']:.4f} kl={train_m['kl']:.4f}) | "
+            f"(recon={train_m['recon']:.4f} kl={train_m['kl']:.4f} uniform={train_m['uniform']:.4f}) | "
             f"val loss={val_m['loss']:.4f} | "
             f"rho {val_m['rho_mean']:.3f}±{val_m['rho_std']:.3f} | "
             f"{elapsed:.1f}s"

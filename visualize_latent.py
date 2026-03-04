@@ -3,10 +3,10 @@ Latent space visualizations for trained SC-VAE.
 
 Usage:
     python visualize_latent.py \
-        --checkpoint checkpoints/pick-place/best.pt \
+        --checkpoint checkpoints/pick-place-rel-no-anneal-uniformity/latest.pt \
         --demo       data/demos/holdout/pick-place-v3_demos.npz \
         --train-demo data/demos/pick-place-v3_demos.npz \
-        --out        figures/pick-place
+        --out        figures/pick-place-rel-no-anneal-uniformity  
 
 Produces:
     umap_phase.png      — UMAP of mu, colored by task phase (timestep quantile)

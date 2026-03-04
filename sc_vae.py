@@ -309,7 +309,8 @@ class TransitionSCVAE(nn.Module):
         l_kl    = _sc_kl_uniform(
             out.rho, self.latent_dim, n_quad_points=self.cfg.kl_quad_points
         ).mean()
-        return l_recon, l_kl
+        l_uniform = _uniformity_loss(out.mu, t=self.cfg.uniformity_t)
+        return l_recon, l_kl, self.cfg.gamma * l_uniform
 
 
 # ===================================================================

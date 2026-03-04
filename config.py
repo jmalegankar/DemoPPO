@@ -32,7 +32,7 @@ class SCVAEConfig:
 
     # ── Loss weights ───────────────────────────────────────────────
     beta:         float = 0.5    # KL weight
-    gamma:        float = 0.1    # uniformity weight
+    gamma:        float = 0.001    # uniformity weight
     uniformity_t: float = 2.0   # bandwidth for uniformity kernel
 
         # ── Training ───────────────────────────────────────────────────
@@ -42,6 +42,6 @@ class SCVAEConfig:
     epochs:           int   = 100
 
     # ── KL annealing (matches paper SMILES setup) ──────────────────
-    kl_warmup_epochs: int   = 10    # beta=0 for this many epochs
-    kl_ramp_epochs:   int   = 50    # linear ramp from 0 → beta_target
+    kl_warmup_epochs: int   = 0    # beta=0 for this many epochs
+    kl_ramp_epochs:   int   = 0    # linear ramp from 0 → beta_target
     beta_target:      float = 0.05  # final KL weight after ramp

@@ -30,6 +30,7 @@ import argparse
 import numpy as np
 import gymnasium as gym
 from pathlib import Path
+from obs_transform import transform_obs_numpy
 import metaworld
 
 EXPERT_POLICIES = {
@@ -87,9 +88,9 @@ def collect_seed(
             action = policy.get_action(obs)
             obs_next, _, terminated, truncated, info = env.step(action)
 
-            ep_obs_t.append(obs.copy().astype(np.float32))
+            ep_obs_t.append(transform_obs_numpy(obs).astype(np.float32))
             ep_actions.append(action.copy().astype(np.float32))
-            ep_obs_next.append(obs_next.copy().astype(np.float32))
+            ep_obs_next.append(transform_obs_numpy(obs_next).astype(np.float32))
 
             obs = obs_next
 
