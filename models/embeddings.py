@@ -1,7 +1,17 @@
+
 from __future__ import annotations
 
 import torch
 import torch.nn as nn
+
+
+@torch.jit.interface
+class EmbeddingInterface:
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        pass
+
+    def out_dim(self) -> int:
+        pass
 
 
 class MLPObsEmbedding(nn.Module):
@@ -12,7 +22,7 @@ class MLPObsEmbedding(nn.Module):
     during PPO rollout.
 
     Args:
-        obs_dim:    input dimension (39 for MetaWorld state obs)
+        obs_dim:    input dimension (e.g. 39 for MetaWorld state obs)
         hidden_dim: width of hidden layers
         out_dim:    output embedding dimension
         n_layers:   number of hidden layers (≥ 1)
@@ -43,8 +53,12 @@ class MLPObsEmbedding(nn.Module):
             ]
         layers.append(nn.Linear(hidden_dim, out_dim))
 
-        self.net     = nn.Sequential(*layers)
-        self.out_dim = out_dim
+        self.net          = nn.Sequential(*layers)
+        self._out_dim_val = out_dim
+
+    @property
+    def out_dim(self) -> int:
+        return self._out_dim_val
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         """
@@ -60,13 +74,14 @@ class MLPObsEmbedding(nn.Module):
 
 class CNNObsEmbedding(nn.Module):
     """
-    Pixel observation embedding — placeholder for the vision experiments.
+    Pixel observation embedding.
     Returns (B, out_dim) via conv stack + flatten + linear projection.
 
     Args:
         in_channels:   number of image channels (e.g. 3 for RGB)
         conv_channels: channel sizes for each conv block
         out_dim:       final embedding dimension
+        input_hw:      (H, W) of input images — used only to infer flat dim
     """
 
     def __init__(
@@ -89,13 +104,16 @@ class CNNObsEmbedding(nn.Module):
             ch = out_ch
         self.conv = nn.Sequential(*layers)
 
-        # infer flattened dim
         with torch.no_grad():
-            dummy     = torch.zeros(1, in_channels, *input_hw)
-            flat_dim  = self.conv(dummy).flatten(1).shape[1]
+            dummy    = torch.zeros(1, in_channels, *input_hw)
+            flat_dim = self.conv(dummy).flatten(1).shape[1]
 
-        self.proj    = nn.Linear(flat_dim, out_dim)
-        self.out_dim = out_dim
+        self.proj         = nn.Linear(flat_dim, out_dim)
+        self._out_dim_val = out_dim
+
+    @property
+    def out_dim(self) -> int:
+        return self._out_dim_val
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         """

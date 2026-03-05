@@ -1,47 +1,64 @@
 from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, Optional
 
 
 @dataclass
-class SCVAEConfig:
+class DemoPPOConfig:
     # ── Observation ────────────────────────────────────────────────
-    obs_type:  Literal["state", "pixels"] = "state"
-    obs_dim:   int  = 39          # flat state dim  (state mode only)
-    act_dim:   int  = 4           # continuous action dim
+    obs_type: Literal["state", "pixels"] = "state"
+    obs_dim:  int = 39          # flat state dim (state mode only)
+    act_dim:  int = 4           # continuous action dim
 
     # ── MLP Embedding (state mode) ─────────────────────────────────
-    mlp_hidden_dim:  int       = 256
-    mlp_n_layers:   int        = 2    # depth of obs embedding MLP
-    embed_out_dim:   int       = 256  # output dim of embedding → feeds encoder trunk
+    mlp_hidden_dim: int = 256
+    mlp_n_layers:   int = 2
+    embed_out_dim:  int = 256   # output dim fed into encoder trunk
 
     # ── Conv Embedding (pixel mode) ────────────────────────────────
-    conv_channels:   list[int] = field(default_factory=lambda: [32, 64, 64])
+    conv_channels: list[int] = field(default_factory=lambda: [32, 64, 64])
 
     # ── Action Embedding ───────────────────────────────────────────
     action_embed_dim: int = 64
 
     # ── Encoder / Decoder trunk ────────────────────────────────────
-    hidden_dim:  int = 256
-    latent_dim:  int = 32
+    hidden_dim: int = 256
+    latent_dim: int = 32
 
     # ── Spherical Cauchy ───────────────────────────────────────────
-    rho_min:      float = 0.1
-    rho_max:      float = 0.95
-    kl_quad_points: int = 64     # Gauss-Legendre points for quadrature KL
+    kl_quad_points: int   = 64
 
-    # ── Loss weights ───────────────────────────────────────────────
-    beta:         float = 0.5    # KL weight
-    gamma:        float = 0.001    # uniformity weight
-    uniformity_t: float = 2.0   # bandwidth for uniformity kernel
+    # ── VAE loss weights ──────────────────────────────────────────
+    beta:         float = 0.5    # KL weight (standalone pre-training)
+    gamma:        float = 0.001  # uniformity regularisation weight
+    uniformity_t: float = 2.0    # RBF bandwidth for uniformity kernel
 
-        # ── Training ───────────────────────────────────────────────────
-    lr:               float = 3e-4
-    weight_decay:     float = 1e-4
-    batch_size:       int   = 256
-    epochs:           int   = 100
+    # ── KL annealing (standalone pre-training only) ───────────────
+    kl_warmup_epochs: int   = 0
+    kl_ramp_epochs:   int   = 0
+    beta_target:      float = 0.05
 
-    # ── KL annealing (matches paper SMILES setup) ──────────────────
-    kl_warmup_epochs: int   = 0    # beta=0 for this many epochs
-    kl_ramp_epochs:   int   = 0    # linear ramp from 0 → beta_target
-    beta_target:      float = 0.05  # final KL weight after ramp
+    # ── Online VAE coefficients (inside PPO update) ───────────────
+    vae_recon_coef: float = 1.0
+    vae_kl_coef:    float = 0.01
+
+    # ── Intrinsic reward ─────────────────────────────────────────
+    intrinsic_scale: float = 1.0
+
+    # ── PPO / RL hyperparameters ──────────────────────────────────
+    # `discount` used for PPO γ to avoid clash with VAE `gamma` above.
+    lr:                  float          = 3e-4
+    weight_decay:        float          = 1e-4
+    n_steps:             int            = 2048   # rollout steps per env
+    ppo_batch_size:      int            = 64     # PPO mini-batch size
+    n_epochs:            int            = 10     # PPO update passes
+    discount:            float          = 0.99
+    gae_lambda:          float          = 0.95
+    clip_range:          float          = 0.2
+    clip_range_vf:       Optional[float] = None
+    normalize_advantage: bool           = True
+    ent_coef:            float          = 0.0
+    vf_coef:             float          = 0.5
+    max_grad_norm:       float          = 0.5
+    target_kl:           Optional[float] = None
