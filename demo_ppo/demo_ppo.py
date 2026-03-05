@@ -191,9 +191,8 @@ class DemoPPO(PPO):
                 s_tp1 = obs_as_tensor(new_obs, self.device)
                 a_t = obs_as_tensor(actions, self.device)
                 vae_tp1 = self.policy.vae_feature_extractor.forward(s_t, a_t, s_tp1)
-                intrinsic_rewards = self.intrinsic_scale * sc_kl_uniform(
-                    vae_tp1.rho, self.policy.vae_feature_extractor.latent_dim
-                )
+                kl_loss = self.policy.vae_feature_extractor.loss(vae_tp1).kl_loss
+                intrinsic_rewards = self.intrinsic_scale * kl_loss
                 intrinsic_rewards = intrinsic_rewards.view(-1).cpu().numpy()
 
             self.num_timesteps += env.num_envs
