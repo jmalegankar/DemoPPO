@@ -25,7 +25,7 @@ class DemoFeaturesExtractor(nn.Module):
     :param mu_dim: Dimension of the VAE mu latent vector.
     """
 
-    def __init__(self, mu_dim: int):
+    def __init__(self, observation_space: spaces.Space, mu_dim: int):
         super().__init__()
         self._features_dim = mu_dim
         self.mu_dim = mu_dim
@@ -97,7 +97,6 @@ class DemoActorCriticPolicy(ActorCriticPolicy):
         if vae_features_extractor_kwargs is None:
             self.vae_features_extractor_kwargs = {}
 
-        self.vae_feature_extractor: VAEInterface = self.vae_features_extractor_class(**self.vae_features_extractor_kwargs)
         super().__init__(
             observation_space,
             action_space,
@@ -117,6 +116,10 @@ class DemoActorCriticPolicy(ActorCriticPolicy):
             optimizer_class,
             optimizer_kwargs,
         )
+    
+    def make_features_extractor(self):
+        self.vae_feature_extractor = self.vae_features_extractor_class(**self.vae_features_extractor_kwargs)
+        return super().make_features_extractor()
 
     def forward(
         self,
@@ -158,7 +161,7 @@ class DemoActorCriticPolicy(ActorCriticPolicy):
         s_tm1 = preprocess_obs(s_tm1, self.observation_space, normalize_images=self.normalize_images)
         s_t = preprocess_obs(s_t, self.observation_space, normalize_images=self.normalize_images)
         mu, _, _ = self.vae_feature_extractor.encode(s_tm1, a_tm1, s_t)
-        features = self.feature_extractor(mu)
+        features = self.features_extractor(mu)
         return features
 
     def get_distribution(
