@@ -26,6 +26,8 @@ from models.embeddings import MLPObsEmbedding
 from demo_ppo.demo_ppo import DemoPPO
 from demo_ppo.policies import DemoActorCriticPolicy
 
+import metaworld
+
 
 # ── MetaWorld gymnasium wrapper ───────────────────────────────────────────────
 
