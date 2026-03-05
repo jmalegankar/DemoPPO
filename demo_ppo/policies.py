@@ -1,0 +1,243 @@
+import warnings
+
+import numpy as np
+import torch as th
+import torch.nn as nn
+from gymnasium import spaces
+from stable_baselines3.common.preprocessing import preprocess_obs
+from stable_baselines3.common.distributions import Distribution
+from stable_baselines3.common.policies import ActorCriticPolicy
+from stable_baselines3.common.type_aliases import Schedule
+
+
+from typing import Any, Optional, Union, Tuple
+
+import typing
+
+
+from models.vae import VAEInterface
+
+class DemoFeaturesExtractor(nn.Module):
+    """
+    Demo features extractor — wraps the VAE mu embedding for use with SB3's
+    ActorCriticPolicy.  Without Wyner, the mu vector is used directly.
+
+    :param mu_dim: Dimension of the VAE mu latent vector.
+    """
+
+    def __init__(self, mu_dim: int):
+        super().__init__()
+        self._features_dim = mu_dim
+        self.mu_dim = mu_dim
+
+    @property
+    def features_dim(self) -> int:
+        return self._features_dim
+
+    def forward(self, mu_features: th.Tensor) -> th.Tensor:
+        return mu_features
+
+class DemoActorCriticPolicy(ActorCriticPolicy):
+    """
+    Policy class for actor-critic algorithms (has both policy and value prediction).
+    Used by A2C, PPO and the likes.
+
+    :param observation_space: Observation space
+    :param action_space: Action space
+    :param lr_schedule: Learning rate schedule (could be constant)
+    :param net_arch: The specification of the policy and value networks.
+    :param activation_fn: Activation function
+    :param ortho_init: Whether to use or not orthogonal initialization
+    :param use_sde: Whether to use State Dependent Exploration or not
+    :param log_std_init: Initial value for the log standard deviation
+    :param full_std: Whether to use (n_features x n_actions) parameters
+        for the std instead of only (n_features,) when using gSDE
+    :param use_expln: Use ``expln()`` function instead of ``exp()`` to ensure
+        a positive standard deviation (cf paper). It allows to keep variance
+        above zero and prevent it from growing too fast. In practice, ``exp()`` is usually enough.
+    :param squash_output: Whether to squash the output using a tanh function,
+        this allows to ensure boundaries when using gSDE.
+    :param features_extractor_class: Features extractor to use.
+    :param features_extractor_kwargs: Keyword arguments
+        to pass to the features extractor.
+    :param share_features_extractor: If True, the features extractor is shared between the policy and value networks.
+    :param normalize_images: Whether to normalize images or not,
+         dividing by 255.0 (True by default)
+    :param optimizer_class: The optimizer to use,
+        ``th.optim.Adam`` by default
+    :param optimizer_kwargs: Additional keyword arguments,
+        excluding the learning rate, to pass to the optimizer
+    """
+
+    def __init__(
+        self,
+        observation_space: spaces.Space,
+        action_space: spaces.Space,
+        lr_schedule: Schedule,
+        net_arch: Optional[Union[list[int], dict[str, list[int]]]] = None,
+        activation_fn: type[nn.Module] = nn.Tanh,
+        ortho_init: bool = True,
+        use_sde: bool = False,
+        log_std_init: float = 0.0,
+        full_std: bool = True,
+        use_expln: bool = False,
+        squash_output: bool = False,
+        features_extractor_class: type[DemoFeaturesExtractor] = DemoFeaturesExtractor,
+        features_extractor_kwargs: Optional[dict[str, Any]] = None,
+        vae_features_extractor_class: VAEInterface = None,
+        vae_features_extractor_kwargs: Optional[dict[str, Any]] = None,
+        share_features_extractor: bool = True,
+        normalize_images: bool = True,
+        optimizer_class: type[th.optim.Optimizer] = th.optim.Adam,
+        optimizer_kwargs: Optional[dict[str, Any]] = None,
+    ):
+        assert share_features_extractor, "DemoPPO does not support separate feature extractors for policy and value networks"
+        self.vae_features_extractor_class = vae_features_extractor_class
+        self.vae_features_extractor_kwargs = vae_features_extractor_kwargs
+        if vae_features_extractor_kwargs is None:
+            self.vae_features_extractor_kwargs = {}
+
+        self.vae_feature_extractor: VAEInterface = self.vae_features_extractor_class(**self.vae_features_extractor_kwargs)
+        super().__init__(
+            observation_space,
+            action_space,
+            lr_schedule,
+            net_arch,
+            activation_fn,
+            ortho_init,
+            use_sde,
+            log_std_init,
+            full_std,
+            use_expln,
+            squash_output,
+            features_extractor_class,
+            features_extractor_kwargs,
+            share_features_extractor,
+            normalize_images,
+            optimizer_class,
+            optimizer_kwargs,
+        )
+
+    def forward(
+        self,
+        s_tm1: th.Tensor,
+        a_tm1: th.Tensor,
+        s_t: th.Tensor,
+        deterministic: bool = False
+    ) -> tuple[th.Tensor, th.Tensor, th.Tensor]:
+        """
+        Forward pass in all the networks (actor and critic)
+
+        :param s_tm1: Previous state
+        :param a_tm1: Previous action
+        :param s_t: Current state
+        :param deterministic: Whether to sample or use deterministic actions
+        :return: action, value and log probability of the action
+        """
+        features = self.extract_features(s_tm1, a_tm1, s_t)
+        if self.share_features_extractor:
+            latent_pi, latent_vf = self.mlp_extractor(features)
+        else:
+            pi_features, vf_features = features
+            latent_pi = self.mlp_extractor.forward_actor(pi_features)
+            latent_vf = self.mlp_extractor.forward_critic(vf_features)
+        # Evaluate the values for the given observations
+        values = self.value_net(latent_vf)
+        distribution = self._get_action_dist_from_latent(latent_pi)
+        actions = distribution.get_actions(deterministic=deterministic)
+        log_prob = distribution.log_prob(actions)
+        actions = actions.reshape((-1, *self.action_space.shape))  # type: ignore[misc]
+        return actions, values, log_prob
+
+    def extract_features(
+        self,
+        s_tm1: th.Tensor,
+        a_tm1: th.Tensor,
+        s_t: th.Tensor,
+    ) -> th.Tensor:
+        s_tm1 = preprocess_obs(s_tm1, self.observation_space, normalize_images=self.normalize_images)
+        s_t = preprocess_obs(s_t, self.observation_space, normalize_images=self.normalize_images)
+        mu, _, _ = self.vae_feature_extractor.encode(s_tm1, a_tm1, s_t)
+        features = self.feature_extractor(mu)
+        return features
+
+    def get_distribution(
+        self,
+        s_tm1: th.Tensor,
+        a_tm1: th.Tensor,
+        s_t: th.Tensor,
+    ) -> Distribution:
+        features = self.extract_features(s_tm1, a_tm1, s_t)
+        latent_pi = self.mlp_extractor.forward_actor(features)
+        return self._get_action_dist_from_latent(latent_pi)
+
+    def predict_values(
+        self,
+        s_tm1: th.Tensor,
+        a_tm1: th.Tensor,
+        s_t: th.Tensor,
+    ) -> th.Tensor:
+        features = self.extract_features(s_tm1, a_tm1, s_t)
+        latent_vf = self.mlp_extractor.forward_critic(features)
+        return self.value_net(latent_vf)
+
+    def evaluate_actions(
+        self,
+        s_tm1: th.Tensor,
+        a_tm1: th.Tensor,
+        s_t: th.Tensor,
+        action: th.Tensor
+    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
+        features = self.extract_features(s_tm1, a_tm1, s_t)
+        latent_vf = self.mlp_extractor.forward_critic(features)
+        values = self.value_net(latent_vf)
+        latent_pi = self.mlp_extractor.forward_actor(features)
+        distribution = self._get_action_dist_from_latent(latent_pi)
+        log_prob = distribution.log_prob(action)
+        return values, log_prob, distribution.entropy()
+
+    def predict(
+        self,
+        s_tm1: th.Tensor,
+        a_tm1: th.Tensor,
+        s_t: th.Tensor,
+        deterministic: bool = False
+    ) -> Tuple[th.Tensor]:
+        self.set_training_mode(False)
+
+        # Check for common mistake that the user does not mix Gym/VecEnv API
+        # Tuple obs are not supported by SB3, so we can safely do that check
+        if isinstance(s_tm1, tuple) and len(s_tm1) == 2 and isinstance(s_tm1[1], dict):
+            raise ValueError(
+                "You have passed a tuple to the predict() function instead of a Numpy array or a Dict. "
+                "You are probably mixing Gym API with SB3 VecEnv API: `obs, info = env.reset()` (Gym) "
+                "vs `obs = vec_env.reset()` (SB3 VecEnv). "
+                "See related issue https://github.com/DLR-RM/stable-baselines3/issues/1694 "
+                "and documentation for more information: https://stable-baselines3.readthedocs.io/en/master/guide/vec_envs.html#vecenv-api-vs-gym-api"
+            )
+
+        s_tm1, vectorized_env = self.obs_to_tensor(s_tm1)
+        s_t, _ = self.obs_to_tensor(s_t)
+        a_tm1 = th.as_tensor(a_tm1, device=s_tm1.device)
+
+        with th.no_grad():
+            distribution = self.get_distribution(s_tm1, a_tm1, s_t)
+            actions = distribution.get_actions(deterministic=deterministic)
+
+        actions = actions.cpu().numpy().reshape((-1, *self.action_space.shape))  # type: ignore[misc, assignment]
+
+        if isinstance(self.action_space, spaces.Box):
+            if self.squash_output:
+                # Rescale to proper domain when using squashing
+                actions = self.unscale_action(actions)  # type: ignore[assignment, arg-type]
+            else:
+                # Actions could be on arbitrary scale, so clip the actions to avoid
+                # out of bound error (e.g. if sampling from a Gaussian distribution)
+                actions = np.clip(actions, self.action_space.low, self.action_space.high)  # type: ignore[assignment, arg-type]
+
+        # Remove batch dimension if needed
+        if not vectorized_env:
+            assert isinstance(actions, np.ndarray)
+            actions = actions.squeeze(axis=0)  # type: ignore[assignment]
+
+        return actions  # type: ignore[return-value]
