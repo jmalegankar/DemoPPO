@@ -92,6 +92,9 @@ def main():
                     help="Number of parallel envs (1 → DummyVecEnv, >1 → SubprocVecEnv)")
     ap.add_argument("--device",     default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--seed",       type=int, default=0)
+    ap.add_argument("--demos",      default=None,
+                    help="Path to .npz demo file; if set, rollouts come from demos "
+                         "and the policy is evaluated on demo actions (DemoReplayPPO)")
     args = ap.parse_args()
 
     out_dir = Path(args.out)
@@ -105,8 +108,15 @@ def main():
     )
 
     # ── Environments ──────────────────────────────────────────────────────────
-    env_fns = [make_env(args.task, args.seed + i) for i in range(args.n_envs)]
-    env = SubprocVecEnv(env_fns) if args.n_envs > 1 else DummyVecEnv(env_fns)
+    if args.demos:
+        from demo_dataset import DemoDataset
+        from helpers.demo_env import DemoReplayEnv, DemoReplayVecEnv
+        demo_ds = DemoDataset(args.demos, normalize=False)
+        env = DemoReplayVecEnv([lambda ds=demo_ds: DemoReplayEnv(ds)] * args.n_envs)
+        print(f"Demo dataset : {demo_ds}  (rollouts from demos, policy evaluated on demo actions)")
+    else:
+        env_fns = [make_env(args.task, args.seed + i) for i in range(args.n_envs)]
+        env = SubprocVecEnv(env_fns) if args.n_envs > 1 else DummyVecEnv(env_fns)
 
     # ── Build embedding to pass into the policy's VAE ─────────────────────────
     # DemoActorCriticPolicy constructs TransitionSCVAE(embedding, cfg) internally.

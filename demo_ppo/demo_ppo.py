@@ -15,6 +15,7 @@ from stable_baselines3 import PPO
 
 from .buffer import TransitionRolloutBuffer
 from .policies import DemoActorCriticPolicy
+from helpers.demo_env import DemoReplayVecEnv
 
 
 from models.vae import VAEInterface, VAEOutput, VAELoss
@@ -168,8 +169,14 @@ class DemoPPO(PPO):
                 s_tm1 = obs_as_tensor(self._prev_last_obs, self.device)  # type: ignore[arg-type]
                 a_tm1 = obs_as_tensor(self._prev_action, self.device)  # type: ignore[arg-type]
                 s_t = obs_as_tensor(self._last_obs, self.device)  # type: ignore[arg-type]
-                actions, values, log_probs = self.policy.forward(s_tm1, a_tm1, s_t)
-            actions = actions.cpu().numpy()
+                if isinstance(env, DemoReplayVecEnv):
+                    # Demo mode: use demo actions, evaluate policy on them
+                    actions = env.get_demo_actions()  # (n_envs, act_dim) numpy
+                    demo_actions_t = obs_as_tensor(actions, self.device)
+                    values, log_probs, _ = self.policy.evaluate_actions(s_tm1, a_tm1, s_t, demo_actions_t)
+                else:
+                    actions, values, log_probs = self.policy.forward(s_tm1, a_tm1, s_t)
+                    actions = actions.cpu().numpy()
 
             # Rescale and perform action
             clipped_actions = actions
