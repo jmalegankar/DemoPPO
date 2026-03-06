@@ -85,9 +85,9 @@ def main():
                     help="MetaWorld task name (e.g. reach-v3, pick-place-v3)")
     ap.add_argument("--checkpoint", default=None,
                     help="Pretrained SC-VAE .pt checkpoint to warm-start the VAE")
-    ap.add_argument("--out",        default="runs/demo_ppo",
+    ap.add_argument("--out",        default="runs/demo_ppo/pick-place-v3",
                     help="Directory to save tensorboard logs and final model")
-    ap.add_argument("--timesteps",  type=int, default=1_000_000)
+    ap.add_argument("--timesteps",  type=int, default=2_000_000)
     ap.add_argument("--n-envs",     type=int, default=4,
                     help="Number of parallel envs (1 → DummyVecEnv, >1 → SubprocVecEnv)")
     ap.add_argument("--device",     default="cuda" if torch.cuda.is_available() else "cpu")

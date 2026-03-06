@@ -30,7 +30,7 @@ import argparse
 import numpy as np
 import gymnasium as gym
 from pathlib import Path
-from obs_transform import transform_obs_numpy
+from helpers.obs_transform import transform_obs_numpy
 import metaworld
 
 EXPERT_POLICIES = {

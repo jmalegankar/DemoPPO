@@ -38,7 +38,7 @@ class DemoPPO(PPO):
         learning_rate: Union[float, Schedule] = 3e-4,
         n_steps: int = 2048,
         batch_size: int = 64,
-        n_epochs: int = 10,
+        n_epochs: int = 1,
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
         clip_range: Union[float, Schedule] = 0.2,
@@ -46,8 +46,8 @@ class DemoPPO(PPO):
         normalize_advantage: bool = True,
         ent_coef: float = 0.0,
         vf_coef: float = 0.5,
-        vae_recon_coef: float = 1.0,
-        vae_kl_coef: float = 0.01,
+        vae_recon_coef: float = 10.0,
+        vae_kl_coef: float = 0.1,
         intrinsic_scale: float = 1.0,
         max_grad_norm: float = 0.5,
         use_sde: bool = False,
@@ -174,22 +174,23 @@ class DemoPPO(PPO):
                     actions = env.get_demo_actions()  # (n_envs, act_dim) numpy
                     demo_actions_t = obs_as_tensor(actions, self.device)
                     values, log_probs, _ = self.policy.evaluate_actions(s_tm1, a_tm1, s_t, demo_actions_t)
+                    clipped_actions = actions
                 else:
                     actions, values, log_probs = self.policy.forward(s_tm1, a_tm1, s_t)
                     actions = actions.cpu().numpy()
 
-            # Rescale and perform action
-            clipped_actions = actions
+                    # Rescale and perform action
+                    clipped_actions = actions
 
-            if isinstance(self.action_space, spaces.Box):
-                if self.policy.squash_output:
-                    # Unscale the actions to match env bounds
-                    # if they were previously squashed (scaled in [-1, 1])
-                    clipped_actions = self.policy.unscale_action(clipped_actions)
-                else:
-                    # Otherwise, clip the actions to avoid out of bound error
-                    # as we are sampling from an unbounded Gaussian distribution
-                    clipped_actions = np.clip(actions, self.action_space.low, self.action_space.high)
+                    if isinstance(self.action_space, spaces.Box):
+                        if self.policy.squash_output:
+                            # Unscale the actions to match env bounds
+                            # if they were previously squashed (scaled in [-1, 1])
+                            clipped_actions = self.policy.unscale_action(clipped_actions)
+                        else:
+                            # Otherwise, clip the actions to avoid out of bound error
+                            # as we are sampling from an unbounded Gaussian distribution
+                            clipped_actions = np.clip(actions, self.action_space.low, self.action_space.high)
 
             new_obs, rewards, dones, infos = env.step(clipped_actions)
 
@@ -278,6 +279,9 @@ class DemoPPO(PPO):
         pg_losses, value_losses = [], []
         clip_fractions = []
         vae_losses = []
+        vae_loss_objs = []
+
+        demo_mode = isinstance(self.env, DemoReplayVecEnv)
 
         continue_training = True
         # train for n_epochs epochs
@@ -297,9 +301,8 @@ class DemoPPO(PPO):
                     actions,
                 )
                 values = values.flatten()
-                # Normalize advantage
+
                 advantages = rollout_data.advantages
-                # Normalization does not make sense if mini batchsize == 1, see GH issue #325
                 if self.normalize_advantage and len(advantages) > 1:
                     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
@@ -310,24 +313,25 @@ class DemoPPO(PPO):
                 policy_loss_1 = advantages * ratio
                 policy_loss_2 = advantages * th.clamp(ratio, 1 - clip_range, 1 + clip_range)
                 policy_loss = -th.min(policy_loss_1, policy_loss_2).mean()
-
-                # Logging
-                pg_losses.append(policy_loss.item())
                 clip_fraction = th.mean((th.abs(ratio - 1) > clip_range).float()).item()
-                clip_fractions.append(clip_fraction)
 
                 if self.clip_range_vf is None:
-                    # No clipping
                     values_pred = values
                 else:
-                    # Clip the difference between old and new value
-                    # NOTE: this depends on the reward scaling
                     values_pred = rollout_data.old_values + th.clamp(
                         values - rollout_data.old_values, -clip_range_vf, clip_range_vf
                     )
-                # Value loss using the TD(gae_lambda) target
                 value_loss = F.mse_loss(rollout_data.returns, values_pred)
+
+                with th.no_grad():
+                    log_ratio = log_prob - rollout_data.old_log_prob
+                    approx_kl_div = th.mean((th.exp(log_ratio) - 1) - log_ratio).cpu().numpy()
+
+                # Logging
+                pg_losses.append(policy_loss.item())
+                clip_fractions.append(clip_fraction)
                 value_losses.append(value_loss.item())
+                approx_kl_divs.append(approx_kl_div)
 
                 # Entropy loss favor exploration
                 if entropy is None:
@@ -352,19 +356,10 @@ class DemoPPO(PPO):
                 )
 
                 vae_losses.append(vae_loss.item())
-
+                vae_loss_objs.append(vae_loss_obj)
                 loss = policy_loss + self.ent_coef * entropy_loss + self.vf_coef * value_loss + vae_loss
 
-                # Calculate approximate form of reverse KL Divergence for early stopping
-                # see issue #417: https://github.com/DLR-RM/stable-baselines3/issues/417
-                # and discussion in PR #419: https://github.com/DLR-RM/stable-baselines3/pull/419
-                # and Schulman blog: http://joschu.net/blog/kl-approx.html
-                with th.no_grad():
-                    log_ratio = log_prob - rollout_data.old_log_prob
-                    approx_kl_div = th.mean((th.exp(log_ratio) - 1) - log_ratio).cpu().numpy()
-                    approx_kl_divs.append(approx_kl_div)
-
-                if self.target_kl is not None and approx_kl_div > 1.5 * self.target_kl:
+                if not demo_mode and self.target_kl is not None and approx_kl_div > 1.5 * self.target_kl:
                     continue_training = False
                     if self.verbose >= 1:
                         print(f"Early stopping at step {epoch} due to reaching max kl: {approx_kl_div:.2f}")
@@ -388,6 +383,8 @@ class DemoPPO(PPO):
         self.logger.record("train/policy_gradient_loss", np.mean(pg_losses))
         self.logger.record("train/value_loss", np.mean(value_losses))
         self.logger.record("train/vae_loss", np.mean(vae_losses))
+        self.logger.record("train/reconstruction_loss", np.mean([l.recon_loss.item() for l in vae_loss_objs]))
+        self.logger.record("train/kl_loss", np.mean([l.kl_loss.item() for l in vae_loss_objs]))
         self.logger.record("train/approx_kl", np.mean(approx_kl_divs))
         self.logger.record("train/clip_fraction", np.mean(clip_fractions))
         self.logger.record("train/loss", loss.item())
