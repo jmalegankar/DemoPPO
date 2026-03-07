@@ -103,8 +103,8 @@ def main():
     # ── Config ────────────────────────────────────────────────────────────────
     cfg = DemoPPOConfig(
         obs_type="state",
-        obs_dim=MetaWorldEnv.OBS_DIM,   # 13
-        act_dim=MetaWorldEnv.ACT_DIM,   # 4
+        # obs_dim=MetaWorldEnv.OBS_DIM,   # 13
+        # act_dim=MetaWorldEnv.ACT_DIM,   # 4
     )
 
     # ── Environments ──────────────────────────────────────────────────────────

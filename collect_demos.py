@@ -88,9 +88,9 @@ def collect_seed(
             action = policy.get_action(obs)
             obs_next, _, terminated, truncated, info = env.step(action)
 
-            ep_obs_t.append(transform_obs_numpy(obs).astype(np.float32))
+            ep_obs_t.append(np.array(obs).astype(np.float32))
             ep_actions.append(action.copy().astype(np.float32))
-            ep_obs_next.append(transform_obs_numpy(obs_next).astype(np.float32))
+            ep_obs_next.append(np.array(obs_next).astype(np.float32))
 
             obs = obs_next
 
