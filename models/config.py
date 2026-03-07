@@ -40,8 +40,8 @@ class DemoPPOConfig:
     beta_target:      float = 0.05
 
     # ── Online VAE coefficients (inside PPO update) ───────────────
-    vae_recon_coef: float = 0.01
-    vae_kl_coef:    float = 0.0001
+    vae_recon_coef: float = 0.1
+    vae_kl_coef:    float = 0.01
 
     # ── Intrinsic reward ─────────────────────────────────────────
     intrinsic_scale: float = 0.1
@@ -50,7 +50,7 @@ class DemoPPOConfig:
     # `discount` used for PPO γ to avoid clash with VAE `gamma` above.
     lr:                  float          = 1e-4
     weight_decay:        float          = 1e-9
-    n_steps:             int            = 512   # rollout steps per env
+    n_steps:             int            = 160   # rollout steps per env
     ppo_batch_size:      int            = 1024     # PPO mini-batch size
     n_epochs:            int            = 1     # PPO update passes
     discount:            float          = 0.99

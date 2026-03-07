@@ -181,7 +181,7 @@ class TransitionSCVAE(nn.Module):
 
     def loss(self, out: VAEOutput) -> VAELoss:
         l_recon = F.mse_loss(out.recon, out.recon_target)
-        l_kl    = sc_kl_uniform(out.rho, self.latent_dim).mean()
+        l_kl    = sc_kl_uniform(out.rho, self.latent_dim)
         l_uniform = uniformity_loss(out.mu, t=self.cfg.uniformity_t)
         return VAELoss(l_recon, l_kl, l_uniform)
 

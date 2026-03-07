@@ -279,7 +279,7 @@ class DemoPPO(PPO):
         pg_losses, value_losses = [], []
         clip_fractions = []
         vae_losses = []
-        vae_loss_objs = []
+        vae_recon_losses, vae_kl_losses = [], []
 
         demo_mode = isinstance(self.env, DemoReplayVecEnv)
 
@@ -298,11 +298,25 @@ class DemoPPO(PPO):
                     rollout_data.prev_observations,   # s_{t-1}
                     rollout_data.prev_actions,        # a_{t-1}
                     rollout_data.observations,        # s_t
-                    actions,
+                    actions,                          # a_t
                 )
                 values = values.flatten()
 
+                # Calculate intrinsic reward using VAE KL 
+                # vae_tp1 = self.policy.vae_feature_extractor.forward(
+                #     rollout_data.observations,
+                #     rollout_data.actions,
+                #     rollout_data.next_observations,
+                # )
+                # vae_tp1_loss = self.policy.vae_feature_extractor.loss(vae_tp1)
+                # intrinsic_rewards = self.intrinsic_scale * vae_tp1_loss.kl_loss.view(-1)
+
+                # values -= intrinsic_rewards.view(-1).detach()
+                # values += intrinsic_rewards.view(-1)
+
                 advantages = rollout_data.advantages
+                # advantages -= intrinsic_rewards.detach()
+                # advantages += intrinsic_rewards
                 if self.normalize_advantage and len(advantages) > 1:
                     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
@@ -348,15 +362,25 @@ class DemoPPO(PPO):
                     rollout_data.observations,
                 )
 
+                recon_loss = 0.0
+                kl_loss = 0.0
+
                 vae_loss_obj = self.policy.vae_feature_extractor.loss(vae_t)
 
+                recon_loss += vae_loss_obj.recon_loss
+                kl_loss += vae_loss_obj.kl_loss.mean()
+
+                # recon_loss += vae_tp1_loss.recon_loss
+                # kl_loss += vae_tp1_loss.kl_loss.mean()
+
                 vae_loss = (
-                    self.vae_recon_coef * vae_loss_obj.recon_loss
-                    + self.vae_kl_coef  * vae_loss_obj.kl_loss
+                    self.vae_recon_coef * recon_loss
+                    + self.vae_kl_coef  * kl_loss
                 )
 
+                vae_recon_losses.append(recon_loss.item())
+                vae_kl_losses.append(kl_loss.item())
                 vae_losses.append(vae_loss.item())
-                vae_loss_objs.append(vae_loss_obj)
                 loss = policy_loss + self.ent_coef * entropy_loss + self.vf_coef * value_loss + vae_loss
 
                 if not demo_mode and self.target_kl is not None and approx_kl_div > 1.5 * self.target_kl:
@@ -383,8 +407,8 @@ class DemoPPO(PPO):
         self.logger.record("train/policy_gradient_loss", np.mean(pg_losses))
         self.logger.record("train/value_loss", np.mean(value_losses))
         self.logger.record("train/vae_loss", np.mean(vae_losses))
-        self.logger.record("train/reconstruction_loss", np.mean([l.recon_loss.item() for l in vae_loss_objs]))
-        self.logger.record("train/kl_loss", np.mean([l.kl_loss.item() for l in vae_loss_objs]))
+        self.logger.record("train/reconstruction_loss", np.mean(vae_recon_losses))
+        self.logger.record("train/kl_loss", np.mean(vae_kl_losses))
         self.logger.record("train/approx_kl", np.mean(approx_kl_divs))
         self.logger.record("train/clip_fraction", np.mean(clip_fractions))
         self.logger.record("train/loss", loss.item())

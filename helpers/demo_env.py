@@ -80,7 +80,7 @@ class DemoReplayEnv(gym.Env):
         demo_action = ep["action"][t].copy()
         done        = (t + 1) >= len(ep["obs_t"])
 
-        rew = -0.01 if not done else 1.0  # small step penalty, reward on episode completion
+        rew = -0.1 if not done else 20.0  # small step penalty, reward on episode completion
 
         self._t += 1
         if not done:
