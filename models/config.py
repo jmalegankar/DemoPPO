@@ -24,7 +24,7 @@ class DemoPPOConfig:
 
     # ── Encoder / Decoder trunk ────────────────────────────────────
     hidden_dim: int = 256
-    latent_dim: int = 32
+    latent_dim: int = 256
 
     # ── Spherical Cauchy ───────────────────────────────────────────
     kl_quad_points: int   = 64
@@ -40,19 +40,19 @@ class DemoPPOConfig:
     beta_target:      float = 0.05
 
     # ── Online VAE coefficients (inside PPO update) ───────────────
-    vae_recon_coef: float = 1.0
-    vae_kl_coef:    float = 0.01
+    vae_recon_coef: float = 0.01
+    vae_kl_coef:    float = 0.0001
 
     # ── Intrinsic reward ─────────────────────────────────────────
-    intrinsic_scale: float = 1.0
+    intrinsic_scale: float = 0.1
 
     # ── PPO / RL hyperparameters ──────────────────────────────────
     # `discount` used for PPO γ to avoid clash with VAE `gamma` above.
-    lr:                  float          = 3e-4
-    weight_decay:        float          = 1e-4
-    n_steps:             int            = 2048   # rollout steps per env
-    ppo_batch_size:      int            = 64     # PPO mini-batch size
-    n_epochs:            int            = 10     # PPO update passes
+    lr:                  float          = 1e-4
+    weight_decay:        float          = 1e-9
+    n_steps:             int            = 512   # rollout steps per env
+    ppo_batch_size:      int            = 1024     # PPO mini-batch size
+    n_epochs:            int            = 1     # PPO update passes
     discount:            float          = 0.99
     gae_lambda:          float          = 0.95
     clip_range:          float          = 0.2
