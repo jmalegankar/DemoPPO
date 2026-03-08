@@ -303,20 +303,20 @@ class DemoPPO(PPO):
                 values = values.flatten()
 
                 # Calculate intrinsic reward using VAE KL 
-                # vae_tp1 = self.policy.vae_feature_extractor.forward(
-                #     rollout_data.observations,
-                #     rollout_data.actions,
-                #     rollout_data.next_observations,
-                # )
-                # vae_tp1_loss = self.policy.vae_feature_extractor.loss(vae_tp1)
-                # intrinsic_rewards = self.intrinsic_scale * vae_tp1_loss.kl_loss.view(-1)
+                vae_tp1 = self.policy.vae_feature_extractor.forward(
+                    rollout_data.observations,
+                    rollout_data.actions,
+                    rollout_data.next_observations,
+                )
+                vae_tp1_loss = self.policy.vae_feature_extractor.loss(vae_tp1)
+                intrinsic_rewards = self.intrinsic_scale * vae_tp1_loss.kl_loss.view(-1)
 
-                # values -= intrinsic_rewards.view(-1).detach()
-                # values += intrinsic_rewards.view(-1)
+                values -= intrinsic_rewards.view(-1).detach()
+                values += intrinsic_rewards.view(-1)
 
                 advantages = rollout_data.advantages
-                # advantages -= intrinsic_rewards.detach()
-                # advantages += intrinsic_rewards
+                advantages -= intrinsic_rewards.detach()
+                advantages += intrinsic_rewards
                 if self.normalize_advantage and len(advantages) > 1:
                     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
@@ -370,8 +370,8 @@ class DemoPPO(PPO):
                 recon_loss += vae_loss_obj.recon_loss
                 kl_loss += vae_loss_obj.kl_loss.mean()
 
-                # recon_loss += vae_tp1_loss.recon_loss
-                # kl_loss += vae_tp1_loss.kl_loss.mean()
+                recon_loss += vae_tp1_loss.recon_loss
+                kl_loss += vae_tp1_loss.kl_loss.mean()
 
                 vae_loss = (
                     self.vae_recon_coef * recon_loss
