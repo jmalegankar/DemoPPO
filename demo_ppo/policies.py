@@ -222,6 +222,8 @@ class DemoActorCriticPolicy(ActorCriticPolicy):
         s_tm1, vectorized_env = self.obs_to_tensor(s_tm1)
         s_t, _ = self.obs_to_tensor(s_t)
         a_tm1 = th.as_tensor(a_tm1, device=s_tm1.device)
+        if not vectorized_env:
+            a_tm1 = a_tm1.unsqueeze(0)
 
         with th.no_grad():
             distribution = self.get_distribution(s_tm1, a_tm1, s_t)

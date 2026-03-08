@@ -34,7 +34,7 @@ class DemoPPO(PPO):
         self,
         policy: DemoActorCriticPolicy,
         env: Union[GymEnv, str],
-        null_action: np.ndarray,
+        null_action: np.ndarray = None,
         learning_rate: Union[float, Schedule] = 3e-4,
         n_steps: int = 2048,
         batch_size: int = 64,
